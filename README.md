@@ -30,3 +30,35 @@ Pair-wise GSB 标注任务仓库（第 15 批 / 221）。
 1. 在本仓库中完成提示词要求的全部内容。
 2. `./mvnw -q verify` 必须通过。
 3. 完成后在所属分支（A 或 B）上提交，产物快照的父提交必须是初始环境快照。
+
+## 实现说明：多维聚合组件
+
+核心类位于 `src/main/java/com/example/gsb/agg/`，入口为 `MultiDimAggregator`。
+
+- `GroupBySpec`：一个分组方案，声明维度子集（如 `province`、`province+city`、`city+channel`）、
+  指标列表（`count/sum/avg/max`，可并行计算）以及每维度的基数上限。
+- `MultiDimAggregator#register`：可注册多个方案，一条数据会更新所有方案；
+  `addEvent` 只定位并更新各方案中受影响的那一个分组（增量更新，不重算全部）。
+- `topN(spec, metric, n)`：按指定指标对分组降序取前 N，不足 N 按实际返回，
+  指标相同按分组键字典序稳定排序。
+- 维度取值超过基数上限时，新取值合并到 `__OTHER__` 桶，被合并的不同取值数由
+  `mergedGroupCount` / `AggregationStats` 统计；查询时被合并的取值会自动映射到该桶。
+- `query(spec, key)`：按分组键查询，命中返回 `Optional<GroupResult>`，未命中返回
+  `Optional.empty()`，键维度与方案不匹配抛异常。
+- `stats()`：返回各方案分组数、被合并组数、指标计算次数与增量更新次数。
+
+示例：
+
+```java
+MultiDimAggregator agg = new MultiDimAggregator();
+agg.register(GroupBySpec.builder("city_sales")
+        .dimensions("province", "city")
+        .metrics(MetricSpec.count(), MetricSpec.sum("amount"),
+                 MetricSpec.avg("amount"), MetricSpec.max("amount"))
+        .cardinalityLimit("city", 100)
+        .build());
+agg.addEvent(Map.of("province", "江苏", "city", "南京", "amount", 42));
+GroupResult r = agg.query("city_sales", Map.of("province", "江苏", "city", "南京")).orElseThrow();
+List<GroupResult> top = agg.topN("city_sales", "sum_amount", 10);
+AggregationStats stats = agg.stats();
+```
